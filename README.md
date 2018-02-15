@@ -47,6 +47,38 @@ A binary named **lctr** will be created.
 
 # Usage
 
+## Basic usage
+
+First, a database must be created:
+
+    lctr --db:/home/me/lctr.db createdb
+
+This creates an empty database file at "/home/me/lctr.db". If the path is
+not specified via "--db", the database will be created in the current directory.
+
+Then, the database needs to be populated. To populate the database, the "refresh"
+command is used:
+
+    lctr --db:/home/me/lctr.db refresh /home/me
+
+This will trawl through the directory "/home/me" and its descendents and build
+up an index of the files and directories therein.
+
+To perform queries, use the "query" command:
+
+    lctr --db:/home/me/lctr.db query 'name:*.foo'
+
+To use the daemon, a monitor must first be configured. Let us create a monitor
+for the entire home directory:
+
+    lctr --db:/home/me/lctr.db monitor add /home/me
+
+Now the daemon can be started:
+
+    lctr --db:/home/me/lctr.db daemon
+
+# Detailed usage
+
 ## Common options
 
 The following options are common for every mode:
