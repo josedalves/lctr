@@ -8,20 +8,29 @@ import tables
 import sequtils
 import db_sqlite
 import ospaths
+import posix
 
 const Rule = """
   rule <- {key ':' value}
-  key <- 'name' / 'size' / 'limit' / 'order' / 'base'
+  key <- 'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group'
   value <- ('+' / '-')? \w+
 """
 
 let KeyValuePEG = peg """
   rule <- key ':' value
-  key <- {'name' / 'size' / 'limit' / 'order' / 'base'}
+  key <- {'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group' }
   value <- {('+' / '-')? \w+}
 """
 
 let rulePEG = peg(Rule)
+
+let queryPEG = peg ("""
+  start <- rule_group ';'? $ / rule_group \s* ';' \s* start $ / $
+  rule_group <- {rule (\s* rule)*}
+  rule <- key ':' value
+  key <- 'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group'
+  value <- ('+' / '-' / '!')? \w+
+""")
 
 
 let sizeValuePEG = peg"""
@@ -34,17 +43,13 @@ let orderPEG = peg"""
   field <- 'name' / 'size'
 """
 
-let queryPEG = peg ("""
-  start <- rule_group ';'? $ / rule_group \s* ';' \s* start $ / $
-  rule_group <- {rule (\s* rule)*}
-  rule <- key ':' value
-  key <- 'name' / 'size' / 'limit' / 'order' / 'base'
-  value <- ('+' / '-')? \w+
-""")
+let userGroupPEG = peg"""
+  value <- {[+-]?} {field}
+  field <- \w+
+"""
 
 
 type
-  QueryBase = tuple[key : string, value : string, op : DBMatchOperator]
 
   QueryFieldType = enum
     QueryFieldTypeString
@@ -52,12 +57,20 @@ type
     QueryFieldTypeSize
     QueryFieldTypeOrder
     QueryFieldTypeLimit
+    QueryFieldTypeOType
+    QueryFieldTypeUser
+    QueryFieldTypeGroup
 
 
 let QueryFields : Table[string, QueryFieldType] = {
   "name" : QueryFieldTypeString,
-  "base" : QueryFieldTypeString,
   "size" : QueryFieldTypeSize,
+  "type" : QueryFieldTypeOType,
+  "owner" : QueryFieldTypeUser,
+  "user" : QueryFieldTypeUser,
+  "group" : QueryFieldTypeGroup,
+  #"permissions" : QueryFieldTypeGroup,
+  "base" : QueryFieldTypeString,
   "order" : QueryFieldTypeOrder,
   "limit" : QueryFieldTypeLimit
 }.toTable()
@@ -95,9 +108,55 @@ proc handleOrder(value : string) : string =
     else:
       return "$1" % value
 
-    
+proc nameToUID(name : string) : int = 
+  var passwd = getpwnam(name)
+  if passwd == nil:
+    raise newException(Exception, "")
+  return cast[int](passwd.pw_uid)
 
+proc nameToGID(name : string) : int = 
+  var gr = getgrnam(name)
+  if gr == nil:
+    raise newException(Exception, "")
+  return cast[int](gr.gr_gid)
 
+proc handleUser(value : string) : DBQuery = 
+  var uid : int
+  var uids : string
+  var op : DBMatchOperator = DBMatchOperatorEq
+  
+  if value =~ userGroupPEG:
+    if matches[0] == "-":
+      op = DBMatchOperatorNe
+    uids = matches[1]
+  else:
+    raise newException(Exception, "No")
+
+  # Check if "value" is an integer
+  try:
+    uid = parseInt(uids)
+  except:
+    uid = nameToUID(uids)
+  return newDBQuery("owner", $uid, op)
+
+proc handleGroup(value : string) : DBQuery = 
+  var gid : int
+  var gids : string
+  var op : DBMatchOperator = DBMatchOperatorEq
+
+  if value =~ userGroupPEG:
+    if matches[0] == "-":
+      op = DBMatchOperatorNe
+    gids = matches[1]
+  else:
+    raise newException(Exception, "No")
+
+  # Check if "value" is an integer
+  try:
+    gid = parseInt(gids)
+  except:
+    gid = nameToGID(gids)
+  return newDBQuery("\"group\"", $gid, op)
 
 proc modeQuery*(config : LCTRConfig, op : var OptParser) = 
   var query : string
@@ -151,6 +210,12 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
           order.add(handleOrder(value))
         of QueryFieldTypeLimit:
           limit = parseInt(value)
+        of QueryFieldTypeUser:
+          g.add($handleUser(value))
+        of QueryFieldTypeGroup:
+          g.add($handleGroup(value))
+        of QueryFieldTypeOType:
+          discard
 
     #echo "G: $1" % g
     #for gg in g:
@@ -174,7 +239,7 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
 
   var db_conn = newLCTRDBConnection(config.dbPath)
 
-  #echo "SELECT * from objects WHERE $1" % (parts.join(" OR "))
+  echo "SELECT * from objects WHERE $1" % (parts.join(" OR "))
   for row in  db_conn.conn.getAllRows(sql ("SELECT path, name from objects WHERE $1 $2 $3" % [parts.join(" OR "), orders, limits])):
     echo joinPath(row[0], row[1])
     #echo row[0]
