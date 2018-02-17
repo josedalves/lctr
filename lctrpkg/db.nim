@@ -24,6 +24,8 @@ type
     DBMatchOperatorLt
     DBMatchOperatorLte
     DBMatchOperatorLike
+    DBMatchOperatorBitAnd
+    DBMatchOperatorBitOr
 
   DBQueryKind* = enum
     And,
@@ -37,6 +39,7 @@ type
     field : string
     value : string
     operator : DBMatchOperator
+    quote : bool
   DBQueryMatchCriteria* = ref DBQueryMatchCriteriaObj
 
   DBQueryObj = object
@@ -368,9 +371,16 @@ proc `$`(op : DBMatchOperator) : string =
       return "<="
     of DBMatchOperatorLike:
       return " LIKE "
+    of DBMatchOperatorBitAnd:
+      return " & "
+    of DBMatchOperatorBitOr:
+      return " | "
 
 proc `$`*(m : DBQueryMatchCriteria) : string = 
-    return "$1$2\"$3\"" % [m.field, $(m.operator), m.value]
+    if m.quote:
+      return "$1$2\"$3\"" % [m.field, $(m.operator), m.value]
+    else:
+      return "$1$2$3" % [m.field, $(m.operator), m.value]
 
 proc `$`*(q : DBQuery) : string =
   if q == nil:
@@ -383,14 +393,15 @@ proc `$`*(q : DBQuery) : string =
     else:
       return $(q.match)
 
-proc newDBQueryMatchCriteria*(field : string, value : string, operator : DBMatchOperator) : DBQueryMatchCriteria = 
+proc newDBQueryMatchCriteria*(field : string, value : string, operator : DBMatchOperator, quote = true) : DBQueryMatchCriteria = 
   result = new DBQueryMatchCriteria
   result.field = field
   result.value = value
   result.operator = operator
+  result.quote = quote
 
-proc newDBQuery*(field : string, value : string, operator : DBMatchOperator) : DBQuery = 
+proc newDBQuery*(field : string, value : string, operator : DBMatchOperator, quote : bool = true) : DBQuery = 
   result = new DBQuery
   result.kind = OpMatch
-  result.match = newDBQueryMatchCriteria(field, value, operator)
+  result.match = newDBQueryMatchCriteria(field, value, operator, quote)
 

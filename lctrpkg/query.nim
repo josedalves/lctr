@@ -10,17 +10,65 @@ import db_sqlite
 import ospaths
 import posix
 
+
+type
+  QueryFieldType = enum
+    QueryFieldTypeString
+    QueryFieldTypeNum
+    QueryFieldTypeSize
+    QueryFieldTypeOrder
+    QueryFieldTypeLimit
+    QueryFieldTypeOType
+    QueryFieldTypeUser
+    QueryFieldTypeGroup
+    QueryFieldTypeMode
+
+
+let QueryFields : Table[string, QueryFieldType] = {
+  "name" : QueryFieldTypeString,
+  "size" : QueryFieldTypeSize,
+  "type" : QueryFieldTypeOType,
+  "owner" : QueryFieldTypeUser,
+  "user" : QueryFieldTypeUser,
+  "group" : QueryFieldTypeGroup,
+  "mode" : QueryFieldTypeMode,
+  "base" : QueryFieldTypeString,
+  "order" : QueryFieldTypeOrder,
+  "limit" : QueryFieldTypeLimit
+}.toTable()
+
+const FIELDS = [
+  "name",
+  "size",
+  "type",
+  "owner",
+  "user",
+  "group",
+  "mode",
+  "base",
+  "order",
+  "limit"
+]
+
+
+
+#PEGs for various components
+const fieldRule = map(FIELDS, proc(x : string) : string = "'" & x & "'").join("/")
+const valueRule = """('+' / '-' / '!')? \w+"""
+const permissionRule = """('u' / 'g' / 'o' / 'a') [+, -] ('r' / 'w' / 'x')"""
+const jointValueRule = "$2 / $1" % [valueRule, permissionRule]
+
 const Rule = """
   rule <- {key ':' value}
-  key <- 'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group'
-  value <- ('+' / '-')? \w+
-"""
+  key <- $1
+  value <- $2
+""" % [fieldRule, jointValueRule]
 
 let KeyValuePEG = peg """
   rule <- key ':' value
-  key <- {'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group' }
-  value <- {('+' / '-')? \w+}
-"""
+  key <- { $1 }
+  value <- { $2 }
+""" % [fieldRule, jointValueRule]
 
 let rulePEG = peg(Rule)
 
@@ -28,9 +76,10 @@ let queryPEG = peg ("""
   start <- rule_group ';'? $ / rule_group \s* ';' \s* start $ / $
   rule_group <- {rule (\s* rule)*}
   rule <- key ':' value
-  key <- 'name' / 'size' / 'limit' / 'order' / 'base' / 'user' / 'group'
-  value <- ('+' / '-' / '!')? \w+
-""")
+""" & """
+  key <- $1
+  value <- $2
+""" % [fieldRule, jointValueRule])
 
 
 let sizeValuePEG = peg"""
@@ -48,32 +97,9 @@ let userGroupPEG = peg"""
   field <- \w+
 """
 
-
-type
-
-  QueryFieldType = enum
-    QueryFieldTypeString
-    QueryFieldTypeNum
-    QueryFieldTypeSize
-    QueryFieldTypeOrder
-    QueryFieldTypeLimit
-    QueryFieldTypeOType
-    QueryFieldTypeUser
-    QueryFieldTypeGroup
-
-
-let QueryFields : Table[string, QueryFieldType] = {
-  "name" : QueryFieldTypeString,
-  "size" : QueryFieldTypeSize,
-  "type" : QueryFieldTypeOType,
-  "owner" : QueryFieldTypeUser,
-  "user" : QueryFieldTypeUser,
-  "group" : QueryFieldTypeGroup,
-  #"permissions" : QueryFieldTypeGroup,
-  "base" : QueryFieldTypeString,
-  "order" : QueryFieldTypeOrder,
-  "limit" : QueryFieldTypeLimit
-}.toTable()
+let permissionsPEG = peg"""
+  value <- {[ugoa]} {[+-]} {[rwx]} / {\d+}
+"""
 
 proc handleSize(key : string, value : string) : DBQuery = 
   var op : DBMatchOperator
@@ -98,7 +124,6 @@ proc handleSize(key : string, value : string) : DBQuery =
   result = newDBQuery(key, base & mul, op)
 
 proc handleOrder(value : string) : string = 
-
   if value =~ orderPEG:
    case matches[0]:
     of "+":
@@ -158,6 +183,42 @@ proc handleGroup(value : string) : DBQuery =
     gid = nameToGID(gids)
   return newDBQuery("\"group\"", $gid, op)
 
+proc handlePermissions(value : string) : DBQuery = 
+  var mask : int = 0
+  var op : DBMatchOperator = DBMatchOperatorEq
+
+  if value =~ permissionsPEG:
+    if matches[0].len() > 0:
+      case matches[2]:
+      of "r":
+        mask = 4
+      of "w":
+        mask = 2
+      of "x":
+        mask = 1
+
+      case matches[0]:
+      of "u":
+        mask = mask shl 6
+      of "g":
+        mask = mask shl 3
+      of "o":
+        # no shifts...
+        discard
+      of "a":
+        mask = mask or (mask shl 3) or (mask shl 6)
+
+      # TODO: THIS IS A HACK!!!
+      if matches[1] == "-":
+        return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorEq, false)
+      else:
+        return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorGt, false)
+
+    elif matches[3].len() > 0:
+      return newDBQuery("mode", value, DBMatchOperatorEq)
+    else:
+      raise newException(Exception, "")
+
 proc modeQuery*(config : LCTRConfig, op : var OptParser) = 
   var query : string
 
@@ -172,6 +233,8 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
 
   ## Check if query string is malformed
   if not (query =~ queryPEG):
+    echo queryPEG
+    echo jointValueRule
     raise newException(Exception, "Query syntax error")
 
 
@@ -196,6 +259,8 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
         let value = matches[1]
         var op : DBMatchOperator
 
+        echo key, value
+
         echo "Key:$1; Value:$2" % [key, value]
 
         case QueryFields[key]:
@@ -216,6 +281,8 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
           g.add($handleGroup(value))
         of QueryFieldTypeOType:
           discard
+        of QueryFieldTypeMode:
+          g.add($handlePermissions(value))
 
     #echo "G: $1" % g
     #for gg in g:
