@@ -26,7 +26,7 @@
     * [ ] Type
     * [x] Owner: query by name and uid
     * [x] Group: query by name and gid
-    * [ ] Permissions
+    * [x] Permissions
     * [ ] Last access time
     * [ ] Last modification time
     * [ ] Creation time
