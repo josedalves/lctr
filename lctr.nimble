@@ -14,4 +14,10 @@ task clean, "Clean source tree":
   rmDir("nimcache")
   rmFile("lctr")
 
+before release:
+  exec "nimble clean"
+
+task release, "Compile for release":
+  exec "nim c -d:release lctr.nim"
+
 
