@@ -1,9 +1,15 @@
-
+# Notes:
+# - times: we only store up to seconds precision. Adding nanosecond precisions
+# is far too much granularity, and would add significant overhead to the
+# database (+3 integers)
+#
 import db_sqlite
 import strutils
 from ospaths import splitPath, DirSep, parentDirs
 import posix
 import tables
+import sequtils
+import dbfields
 
 
 type
@@ -63,18 +69,34 @@ type
     order : DBOrderKind
   DBOrderBy = ref DBOrderByObj
 
-  ## File attributes. Basically, a copy of 'stat' in a more readable format
-  LCTRAttributes* = object of RootObj
+  # File attributes. Basically, a copy of 'stat' in a more readable format
+  LCTRAttributesObj* = object of RootObj
     name* : string
     path* : string
     owner : int
     group : int
     size : int
-    mode : int
-    ftype : int
     atime : int
     mtime : int
     ctime : int
+    mode : LCTRAttributeMode
+  LCTRAttributes* = ref LCTRAttributesObj
+
+  LCTRAttributeModeObj = object
+    ftype : int
+    xu : bool
+    xg : bool
+    xo : bool
+    ru : bool
+    rg : bool
+    ro : bool
+    wu : bool
+    wg : bool
+    wo : bool
+    suid : bool
+    sgid : bool
+    svtx : bool
+  LCTRAttributeMode =  ref LCTRAttributeModeObj
 
   LCTRDBConnection* = object of RootObj
     conn* : DbConn
@@ -90,91 +112,52 @@ type
 
 # SQL STATEMENTS
 
-# Monitors
-let SQL_INSERT_MONITOR = sql"""INSERT INTO monitors (path, recursive) VALUES (?, ?) """
-let SQL_DELETE_MONITOR = sql"""DELETE FROM monitors where path=?"""
+proc newLCTRAttributeMode(mode : int) : LCTRAttributeMode =
+  result = new LCTRAttributeMode
+  result.ftype = mode and S_IFMT
 
-# Objects
+  # user
+  result.xu = (mode and S_IXUSR) > 0
+  result.ru = (mode and S_IRUSR) > 0
+  result.wu = (mode and S_IWUSR) > 0
 
-let SQL_ADD_OBJECT = sql"""
-    INSERT INTO objects (
-      "name",
-      "path",
-      "owner",
-      "group",
-      "size",
-      "mode",
-      "atime",
-      "mtime",
-      "ctime",
-      "type"
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+  # group
+  result.xg = (mode and S_IXGRP) > 0
+  result.rg = (mode and S_IRGRP) > 0
+  result.wg = (mode and S_IWGRP) > 0
 
-let SQL_ADD_OR_REPLACE_OBJECT = sql"""
-    INSERT OR REPLACE INTO objects (
-      "name",
-      "path",
-      "owner",
-      "group",
-      "size",
-      "mode",
-      "atime",
-      "mtime",
-      "ctime",
-      "type"
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+  # other
+  result.xo = (mode and S_IXOTH) > 0
+  result.ro = (mode and S_IROTH) > 0
+  result.wo = (mode and S_IWOTH) > 0
 
-let SQL_UPDATE_OBJECT = sql"""
-    UPDATE  objects set 
-      "owner"=?,
-      "group"=?,
-      "size"=?,
-      "mode"=?,
-      "atime"=?,
-      "mtime"=?,
-      "ctime"=?,
-      "type"=?
-    WHERE
-      "name"=? AND "path"=?
-"""
-
-let SQL_DELETE_OBJECT = sql"""
-    DELETE FROM objects where name=? and path=?
-"""
-
-# Get
-let SQL_GET_DIRECTORY_FILENAMES = sql"""
-  SELECT name from objects WHERE path=?
-"""
-
-#
+  # suid, etc
+  result.suid = (mode and S_ISUID) > 0
+  result.sgid = (mode and S_ISGID) > 0
+  result.svtx = (mode and S_ISVTX) > 0
 
 proc newLCTRAttributes*(name : string, path : string, info : Stat) : LCTRAttributes = 
-  {.hint : "Time is innacurate".}
-
+  var mode = cast[int](info.st_mode)
+  result = new LCTRAttributes
   result.name = name
   result.path = path
   result.owner = cast[int](info.st_uid)
   result.group = cast[int](info.st_gid)
   result.size = cast[int](info.st_size)
-  result.mode = cast[int](info.st_mode)
+  result.mode = newLCTRAttributeMode(mode)
   result.atime = cast[int](info.st_atim.tv_sec)
   result.ctime = cast[int](info.st_ctim.tv_sec)
   result.mtime = cast[int](info.st_mtim.tv_sec)
 
 proc newLCTRAttributes*(path : string, info : Stat) : LCTRAttributes = 
-  {.hint : "Time is innacurate".}
-
+  var mode = cast[int](info.st_mode)
+  result = new LCTRAttributes
   result.name = ""
   result.path = path
   result.owner = cast[int](info.st_uid)
   result.group = cast[int](info.st_gid)
   result.size = cast[int](info.st_size)
-  result.mode = cast[int](info.st_mode)
+  result.mode = newLCTRAttributeMode(mode)
   result.atime = cast[int](info.st_atim.tv_sec)
   result.ctime = cast[int](info.st_ctim.tv_sec)
   result.mtime = cast[int](info.st_mtim.tv_sec)
@@ -195,7 +178,6 @@ method createDB*(self : LCTRDBConnection, overwrite : bool = false) {.noSideEffe
   self.conn.exec(sql"DROP TABLE IF EXISTS meta;")
   self.conn.exec(sql"DROP TABLE IF EXISTS objects;")
   self.conn.exec(sql"DROP TABLE IF EXISTS monitors;")
-  #self.conn.exec(sql"DROP TABLE IF EXISTS parents;")
 
   self.conn.exec(sql"""
   CREATE TABLE meta (
@@ -207,21 +189,7 @@ method createDB*(self : LCTRDBConnection, overwrite : bool = false) {.noSideEffe
   INSERT INTO meta ("version") VALUES (1)
   """)
 
-  self.conn.exec(sql"""
-  CREATE TABLE objects (
-    "name" VARCHAR NOT NULL,
-    "path" VARCHAR NOT NULL,
-    "owner" INTEGER NOT NULL,
-    "group" INTEGER NOT NULL,
-    "size" INTEGER NOT NULL,
-    "mode" INTEGER NOT NULL,
-    "atime" INTEGER NOT NULL,
-    "mtime" INTEGER NOT NULL,
-    "ctime" INTEGER NOT NULL,
-    "type" INTEGER NOT NULL,
-    PRIMARY KEY (name, path)
-  )
-  """)
+  self.conn.exec(sql(SQL_CREATE_TABLE_OBJECTS))
 
   self.conn.exec(sql"""
   CREATE TABLE monitors (
@@ -245,12 +213,12 @@ method createDB*(self : LCTRDBConnection, overwrite : bool = false) {.noSideEffe
 
 method addMonitor*(self : LCTRDBConnection, path : string, recursive : bool) : bool =
   {.hint : "FIXME: Handle errors" .}
-  self.conn.exec(SQL_INSERT_MONITOR, path, $cast[int](recursive))
+  self.conn.exec(sql SQL_INSERT_MONITOR, path, $cast[int](recursive))
   return true
 
 method delMonitor*(self : LCTRDBConnection, path : string ) : bool =
   {.hint : "FIXME: Handle errors" .}
-  self.conn.exec(SQL_DELETE_MONITOR, path)
+  self.conn.exec(sql SQL_DELETE_MONITOR, path)
   return true
 
 method getMonitors*(self : LCTRDBConnection) : seq[tuple[path : string, recursive : bool]] =
@@ -263,7 +231,7 @@ method getMonitors*(self : LCTRDBConnection) : seq[tuple[path : string, recursiv
 method getDirectoryFileNames*(self : LCTRDBConnection, directory : string) : seq[string] = 
   result = @[]
 
-  for row in self.conn.rows(SQL_GET_DIRECTORY_FILENAMES, directory):
+  for row in self.conn.rows(sql SQL_GET_DIRECTORY_FILENAMES, directory):
     result.add(row[0])
   #echo result
 
@@ -291,51 +259,102 @@ method rmDirTree*(self : LCTRDBConnection, dir : string) =
 
 method addObject*(self : LCTRDBConnection, attributes : LCTRAttributes) {.noSideEffect.} =
   self.conn.exec(
-    SQL_ADD_OBJECT,
+    sql SQL_ADD_OBJECT,
     attributes.name,
     attributes.path,
     attributes.owner,
     attributes.group,
     attributes.size,
-    attributes.mode,
+
+    attributes.mode.ftype,
+
+    attributes.mode.xu,
+    attributes.mode.xg,
+    attributes.mode.xo,
+
+    attributes.mode.ru,
+    attributes.mode.rg,
+    attributes.mode.ro,
+
+    attributes.mode.wu,
+    attributes.mode.wg,
+    attributes.mode.wo,
+
+    attributes.mode.suid,
+    attributes.mode.sgid,
+    attributes.mode.svtx,
+
     attributes.atime,
     attributes.mtime,
-    attributes.ctime,
-    0
+    attributes.ctime
   )
 
 method addOrReplaceObject*(self : LCTRDBConnection, attributes : LCTRAttributes) {.noSideEffect.} =
   self.conn.exec(
-    SQL_ADD_OR_REPLACE_OBJECT,
+    sql SQL_ADD_OR_REPLACE_OBJECT,
     attributes.name,
     attributes.path,
     attributes.owner,
     attributes.group,
     attributes.size,
-    attributes.mode,
+
+    attributes.mode.ftype,
+
+    attributes.mode.xu,
+    attributes.mode.xg,
+    attributes.mode.xo,
+
+    attributes.mode.ru,
+    attributes.mode.rg,
+    attributes.mode.ro,
+
+    attributes.mode.wu,
+    attributes.mode.wg,
+    attributes.mode.wo,
+
+    attributes.mode.suid,
+    attributes.mode.sgid,
+    attributes.mode.svtx,
+
     attributes.atime,
     attributes.mtime,
-    attributes.ctime,
-    0
+    attributes.ctime
   )
 
 method updateObject*(self : LCTRDBConnection, attributes : LCTRAttributes) {.noSideEffect.} =
   discard self.conn.execAffectedRows(
-    SQL_UPDATE_OBJECT,
+    sql SQL_UPDATE_OBJECT,
     attributes.owner,
     attributes.group,
     attributes.size,
-    attributes.mode,
+
+    attributes.mode.ftype,
+
+    attributes.mode.xu,
+    attributes.mode.xg,
+    attributes.mode.xo,
+
+    attributes.mode.ru,
+    attributes.mode.rg,
+    attributes.mode.ro,
+
+    attributes.mode.wu,
+    attributes.mode.wg,
+    attributes.mode.wo,
+
+    attributes.mode.suid,
+    attributes.mode.sgid,
+    attributes.mode.svtx,
+
     attributes.atime,
     attributes.mtime,
     attributes.ctime,
-    0,
     attributes.name,
     attributes.path
   )
 
 method delObject*(self : LCTRDBConnection, name : string, path : string) {.base, noSideEffect.} =
-  self.conn.exec(SQL_DELETE_OBJECT, name, path)
+  self.conn.exec(sql SQL_DELETE_OBJECT, name, path)
 
 method handleQuery*(self : LCTRDBConnection, kind : DBQueryKind, attributes : LCTRAttributes) : LCTRDBQueryResult {.gcsafe.} = 
   var result : LCTRDBQueryResult
