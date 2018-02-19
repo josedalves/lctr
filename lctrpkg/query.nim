@@ -134,19 +134,19 @@ proc modeToFileTypeMask(str : string) : int =
   for c in str:
     case c:
     of 'b': # block special
-      result = result or 0o60000
+      result = result or 0o6
     of 'c': # character special
-      result = result or 0o20000
+      result = result or 0o2
     of 'd': # directory
-      result = result or 0o40000
+      result = result or 0o4
     of 'p': # FIFO (named pipe)
-      result = result or 0o10000
+      result = result or 0o1
     of 'f': # regular file
-      result = result or 0o100000
+      result = result or 0o10
     of 'l': # symbolic link
-      result = result or 0o120000
+      result = result or 0o12
     of 's': # socket
-      result = result or 0o140000
+      result = result or 0o14
     else:
       raise newException(Exception, "")
 
@@ -155,11 +155,10 @@ proc handleType(value : string) : DBQuery =
 
   if value =~ filetypePEG:
     mask = modeToFileTypeMask(matches[1])
-
     if matches[0].len() == 0:
-      return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorGt, false)
+      return newDBQuery("type", $mask, DBMatchOperatorEq, false)
     else:
-      return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorEq, false)
+      return newDBQuery("type", $mask, DBMatchOperatorNe, false)
   raise newException(Exception, "")
 
 proc handleSize(key : string, value : string) : DBQuery = 
@@ -250,33 +249,15 @@ proc handlePermissions(value : string) : DBQuery =
 
   if value =~ permissionsPEG:
     if matches[0].len() > 0:
-      case matches[2]:
-      of "r":
-        mask = 4
-      of "w":
-        mask = 2
-      of "x":
-        mask = 1
+      var field : string = matches[2] & matches[0]
 
-      case matches[0]:
-      of "u":
-        mask = mask shl 6
-      of "g":
-        mask = mask shl 3
-      of "o":
-        # no shifts...
-        discard
-      of "a":
-        mask = mask or (mask shl 3) or (mask shl 6)
-
-      # TODO: THIS IS A HACK!!!
       if matches[1] == "-":
-        return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorEq, false)
+        return newDBQuery("$1" % field, "true", DBMatchOperatorEq)
       else:
-        return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorGt, false)
-
-    elif matches[3].len() > 0:
-      return newDBQuery("mode", value, DBMatchOperatorEq)
+        return newDBQuery("$1" % field, "true", DBMatchOperatorNe)
+      ## TODO: Numeric mode!
+      #elif matches[3].len() > 0:
+      #  return newDBQuery("mode", value, DBMatchOperatorEq)
     else:
       raise newException(Exception, "")
 

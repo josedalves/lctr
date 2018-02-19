@@ -114,7 +114,9 @@ type
 
 proc newLCTRAttributeMode(mode : int) : LCTRAttributeMode =
   result = new LCTRAttributeMode
-  result.ftype = mode and S_IFMT
+
+  # Type
+  result.ftype = (mode and S_IFMT) shr 12
 
   # user
   result.xu = (mode and S_IXUSR) > 0
