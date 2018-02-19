@@ -101,6 +101,67 @@ let permissionsPEG = peg"""
   value <- {[ugoa]} {[+-]} {[rwx]} / {\d+}
 """
 
+let filetypePEG = peg"""
+  value <- {'!'?}  { 'b' / 'c' / 'd' / 'p' / 'f' / 'l' / 's' }
+"""
+
+proc modeToFileTypeMask(str : string) : int = 
+  #[
+  NOTE:
+  
+  From the "stat" manpage (man 2 stat):
+
+  POSIX refers to the st_mode bits corresponding to the mask S_IFMT (see below)
+  as the file type, the 12 bits corresponding to the mask 07777 as the file mode
+  bits and the least significant  9 bits (0777) as the file permission bits.
+
+  The following mask values are defined for the file type of the st_mode
+  field:
+
+    S_IFMT     0170000   bit mask for the file type bit field
+
+    S_IFSOCK   0140000   socket
+    S_IFLNK    0120000   symbolic link
+    S_IFREG    0100000   regular file
+    S_IFBLK    0060000   block device
+    S_IFDIR    0040000   directory
+    S_IFCHR    0020000   character device
+    S_IFIFO    0010000   FIFO
+
+  ]#
+  result = 0
+
+  for c in str:
+    case c:
+    of 'b': # block special
+      result = result or 0o60000
+    of 'c': # character special
+      result = result or 0o20000
+    of 'd': # directory
+      result = result or 0o40000
+    of 'p': # FIFO (named pipe)
+      result = result or 0o10000
+    of 'f': # regular file
+      result = result or 0o100000
+    of 'l': # symbolic link
+      result = result or 0o120000
+    of 's': # socket
+      result = result or 0o140000
+    else:
+      raise newException(Exception, "")
+
+proc handleType(value : string) : DBQuery = 
+  var mask : int
+
+  if value =~ filetypePEG:
+    mask = modeToFileTypeMask(matches[1])
+
+    if matches[0].len() == 0:
+      return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorGt, false)
+    else:
+      return newDBQuery("mode & $1" % $mask, "0", DBMatchOperatorEq, false)
+  raise newException(Exception, "")
+
 proc handleSize(key : string, value : string) : DBQuery = 
   var op : DBMatchOperator
   var base : string
@@ -280,6 +341,7 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
         of QueryFieldTypeGroup:
           g.add($handleGroup(value))
         of QueryFieldTypeOType:
+          g.add($handleType(value))
           discard
         of QueryFieldTypeMode:
           g.add($handlePermissions(value))
