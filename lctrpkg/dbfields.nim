@@ -59,7 +59,11 @@ const ALL_OBJECT_FIELDS = (
 const ALL_OBJECT_FIELDS_QUOTED = (proc () : string = map(ALL_OBJECT_FIELDS, proc (x : string) : string = "\""&x&"\"").join(",\n"))()
 
 # All fields for "object" table, quoted and prepated for UPDATE
-const ALL_OBJECT_FIELDS_QUOTEDU = (proc () : string = map(ALL_OBJECT_FIELDS, proc (x : string) : string = "\""&x&"\"").join("=?,\n"))()
+const ALL_OBJECT_FIELDS_QUOTEDU = (proc () : string = map(ALL_OBJECT_FIELDS[2..^1], proc (x : string) : string = "\""&x&"\"=?").join(",\n"))()
+#                                                                            ^
+#                                                                      Hacky |
+
+
 
 # All fields for "object" table, quoted and prepared for CREATE
 const ALL_OBJECT_FIELDS_QUOTEDC = (

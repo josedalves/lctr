@@ -14,17 +14,6 @@ import lctrpkg.index
 const
   DEFAULT_DB_LOCATION = "db"
 
-const
-  INOTIFY_EVENTS = (pinotify.IN_MODIFY or
-    pinotify.IN_ATTRIB or
-    pinotify.IN_CLOSE_WRITE or
-    pinotify.IN_MOVE or
-    pinotify.IN_CREATE or
-    pinotify.IN_DELETE or
-    pinotify.IN_DELETE_SELF or
-    pinotify.IN_MOVE_SELF
-  )
-
 proc usage() = 
   echo "LCTR [options] <command> [command options]"
   echo "Available commands:"

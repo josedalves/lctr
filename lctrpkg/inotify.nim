@@ -6,69 +6,87 @@ import selectors
 
 # Inotify event class. Represents one inotify event
 type
-  InotifyEvent* = object of RootObj
-    wd* : cint
-    mask* : uint32
-    cookie* : uint32
-    name* : string
+  InotifyEventObj* = object of RootObj
+    wd : cint
+    mask : uint32
+    cookie : uint32
+    name : string
+    path : string
+  InotifyEvent* = ref InotifyEventObj
 
-proc newInotifyEvent*(wd : cint, mask : uint32, cookie : uint32, name : string) : InotifyEvent =
-  var i: InotifyEvent
-  i.wd = wd
-  i.mask = mask
-  i.cookie = cookie
-  i.name = name
-  return i
+# The errno variable
+var errno {.importc, header: "<errno.h>".}: cint ## error variable
 
-## Inotify Watcher. Contains watcher information.
+proc name*(self : InotifyEvent) : string {.inline.} = self.name
+proc path*(self : InotifyEvent) : string {.inline.} = self.path
+proc mask*(self : InotifyEvent) : uint32 {.inline.} = self.mask
+proc cookie*(self : InotifyEvent) : uint32 {.inline.} = self.cookie
+
+proc newInotifyEvent*(wd : cint, mask : uint32, cookie : uint32, name : string, path : string) : InotifyEvent =
+  result = new InotifyEvent
+  result.wd = wd
+  result.mask = mask
+  result.cookie = cookie
+  result.name = name
+  result.path = path
+
+# Inotify Watcher. Contains watcher information.
 type
-  InotifyWatcher* = object of RootObj
-    wd* : FileHandle
-    path* : string
-    mask* : uint32
+  InotifyWatcherObj = object of RootObj
+    wd : FileHandle
+    path : string
+    mask : uint32
+  InotifyWatcher = ref InotifyWatcherObj
 
 proc newInotifyWatcher*(fd : cint, path : string, mask : uint32) : InotifyWatcher =
-  var w : InotifyWatcher
-  w.wd = fd
-  w.path = path
-  w.mask = mask
-  return w
+  result = new InotifyWatcher
+  result.wd = fd
+  result.path = path
+  result.mask = mask
 
-## Inotify Manager. Contains overall inotify info
+# Inotify Manager. Contains overall inotify info
 type
-  InotifyManager* = object of RootObj
+  InotifyManagerObj = object of RootObj
     fd : FileHandle
     file : File
     watchers : seq[InotifyWatcher]
     selector : Selector
+  InotifyManager = ref InotifyManagerObj
+
+method getWatcher*(self : InotifyManager, wd : int) : InotifyWatcher =
+  for w in self.watchers:
+    if w.wd == wd:
+      return w
+  raise newException(Exception, "No watcher")
 
 proc newInotifyManager*() : InotifyManager = 
-  var i : InotifyManager
+  result = new InotifyManager
+
   var fd : FileHandle = inotify.inotify_init()
 
-  i.fd = fd
-  if system.open(i.file, fd) != true:
+  result.fd = fd
+  if system.open(result.file, fd) != true:
     echo "Bad!"
 
-  i.watchers = newSeq[InotifyWatcher]()
+  result.watchers = @[]
 
   ## Selector
-  i.selector = newSelector()
-  i.selector.register(cast[SocketHandle](i.fd), {EvRead}, nil)
-  return i
+  result.selector = newSelector()
+  result.selector.register(cast[SocketHandle](result.fd), {EvRead}, nil)
 
-
-
-## Add a new watcher
-method addWatcher*(i : var InotifyManager, path : string, mask : uint32, recursive : bool = false ) : bool {.base.} = 
+# Add a new watcher
+method addWatcher*(i : InotifyManager, path : string, mask : uint32, recursive : bool = false ) : bool {.base.} = 
   var w : cint
 
+  echo len(i.watchers)
+  #echo i.fd, path, mask
   w = inotify.inotify_add_watch(i.fd, path, mask)
   if w < 0:
-    echo "Bad Bad!"
+    #echo "Bad Bad!  ", w
+    echo strerror(w)
+    echo strerror(errno)
+    echo cast[int](w)
     return false
-
-
 
   i.watchers.add(newInotifyWatcher(w, path, mask))
   if recursive:
@@ -76,12 +94,11 @@ method addWatcher*(i : var InotifyManager, path : string, mask : uint32, recursi
       if kind == pcDir:
         discard i.addWatcher(npath, mask, recursive)
 
-
   return true
 
 # Return true if there are any events to be read
 # Timeout: milliseconds
-method peek*(self : var InotifyManager, timeout : int) : bool = 
+method peek*(self : InotifyManager, timeout : int) : bool = 
   let sel = self.selector.select(timeout)
   if len(sel) > 0:
     for ev in sel:
@@ -91,7 +108,7 @@ method peek*(self : var InotifyManager, timeout : int) : bool =
   return false
 
 ## Read one event
-method readEvent*(self : var InotifyManager, timeout : int = 0) : InotifyEvent {.raises : [Exception], base.} = 
+method readEvent*(self : InotifyManager, timeout : int = 0) : InotifyEvent {.raises : [Exception], base.} = 
   var
     buffer : array[4, uint8]
     wd : cint
@@ -105,8 +122,6 @@ method readEvent*(self : var InotifyManager, timeout : int = 0) : InotifyEvent {
   if timeout > 0:
     if not self.peek(timeout):
       raise newException(Exception, "Timeout")
-
-  
 
   if system.readBytes(self.file, buffer, 0, 4) != 4:
     raise newException(Exception, "Expected 4 bytes")
@@ -137,15 +152,10 @@ method readEvent*(self : var InotifyManager, timeout : int = 0) : InotifyEvent {
     if read != lni:
       raise newException(Exception, format("Read %s. Expected %s", read, lni))
     name = cast[string](sq)
-    ## Strip 0x00 from the string. inotify spec says that messages can be padded
-    ## with those
+    # Strip 0x00 from the string. inotify spec says that messages can be padded
+    # with those
     name = name.strip(chars = {'\x00'})
 
-  return newInotifyEvent(wd, mask, cookie, name)
+  return newInotifyEvent(wd, mask, cookie, name, path = self.getWatcher(cast[int](wd)).path)
 
-method getWatcher*(self : InotifyManager, wd : int) : InotifyWatcher =
-  for w in self.watchers:
-    if w.wd == wd:
-      return w
-  raise newException(Exception, "No watcher")
 

@@ -324,7 +324,7 @@ method addOrReplaceObject*(self : LCTRDBConnection, attributes : LCTRAttributes)
   )
 
 method updateObject*(self : LCTRDBConnection, attributes : LCTRAttributes) {.noSideEffect.} =
-  discard self.conn.execAffectedRows(
+  self.conn.exec(
     sql SQL_UPDATE_OBJECT,
     attributes.owner,
     attributes.group,
@@ -351,6 +351,7 @@ method updateObject*(self : LCTRDBConnection, attributes : LCTRAttributes) {.noS
     attributes.atime,
     attributes.mtime,
     attributes.ctime,
+
     attributes.name,
     attributes.path
   )
