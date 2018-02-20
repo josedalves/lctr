@@ -7,6 +7,7 @@ import posix.inotify as pinotify
 import posix
 import db
 import datatypes
+import db_sqlite
 
 var process_lock : Lock
 
@@ -25,8 +26,12 @@ const
 type
   MyInotifyEvent = inotify.InotifyEvent
 
+var errno {.importc, header: "<errno.h>".}: cint ## error variable
+
 proc myStat(dir : string) : Stat =
-  if stat(dir, result) != 0:
+  var r = stat(dir, result)
+  if r != 0:
+    echo strerror(errno)
     raise newException(Exception, "Bad stat")
 
 proc processThread(config : LCTRConfig,  events : seq[MyInotifyEvent]) = 
@@ -48,21 +53,33 @@ proc processThread(config : LCTRConfig,  events : seq[MyInotifyEvent]) =
     echo e.path
     echo e.mask
 
-    if (e.mask and pinotify.IN_ATTRIB) != 0:
-      db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
-    elif (e.mask and pinotify.IN_CLOSE_WRITE) != 0:
-      db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
-    elif (e.mask and pinotify.IN_MOVE) != 0:
-      discard
-    elif (e.mask and pinotify.IN_CREATE) != 0:
-      db_conn.addObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
-    elif (e.mask and pinotify.IN_DELETE) != 0:
-      db_conn.delObject(e.name, e.path)
-    elif (e.mask and pinotify.IN_MODIFY) != 0:
-      db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
-    elif (e.mask and pinotify.IN_DELETE_SELF) != 0:
-      discard
-    elif (e.mask and pinotify.IN_MOVE_SELF) != 0:
+    try:
+      if (e.mask and pinotify.IN_ISDIR) != 0:
+        continue
+      if (e.mask and pinotify.IN_ATTRIB) != 0:
+        echo "1"
+        db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
+      elif (e.mask and pinotify.IN_CLOSE_WRITE) != 0:
+        echo "2"
+        db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
+      elif (e.mask and pinotify.IN_MOVE) != 0:
+        discard
+      elif (e.mask and pinotify.IN_CREATE) != 0:
+        echo "3"
+        db_conn.addOrReplaceObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
+      elif (e.mask and pinotify.IN_DELETE) != 0:
+        echo "4"
+        db_conn.delObject(e.name, e.path)
+      elif (e.mask and pinotify.IN_MODIFY) != 0:
+        echo "5"
+        db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
+      elif (e.mask and pinotify.IN_DELETE_SELF) != 0:
+        discard
+      elif (e.mask and pinotify.IN_MOVE_SELF) != 0:
+        discard
+    except DBError:
+      raise
+    except:
       discard
   db_conn.close()
   echo "Done"
@@ -80,11 +97,15 @@ proc monitorThread(config : LCTRConfig) =
   #    discard im.addWatcher(monitor_spec.path, pinotify.IN_ALL_EVENTS, monitor_spec.recursive)
   db.close()
 
-  discard im.addWatcher(expandFilename("~/work"), INOTIFY_EVENTS, true)
+  #echo expandFilename("~/work")
+  discard im.addWatcher(expandTilde("~/work"), INOTIFY_EVENTS, true)
 
   while true:
     try:
       let ie = im.readEvent(1000)
+      if joinPath(ie.path, ie.name) ==  expandFilename(config.dbPath):
+        #HACK: filter out db file
+        continue
       cache.add(ie)
     except Exception:
       discard
