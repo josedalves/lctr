@@ -33,7 +33,9 @@ const QueryFields : Table[string, QueryFieldType] = {
   "user" : QueryFieldTypeUser,
   "group" : QueryFieldTypeGroup,
   "mode" : QueryFieldTypeMode,
-  "time" : QueryFieldTypeTime,
+  "mtime" : QueryFieldTypeTime,
+  "atime" : QueryFieldTypeTime,
+  "ctime" : QueryFieldTypeTime,
   "base" : QueryFieldTypeString,
   "order" : QueryFieldTypeOrder,
   "limit" : QueryFieldTypeLimit
@@ -104,18 +106,17 @@ let datetimePEG = peg"""
   date <- [0-9] [0-9] [0-9] [0-9] '-' [0-9] [0-9] '-' [0-9] [0-9]
 """
 
-proc handleTime(value : string) : DBQuery = 
+proc handleTime(key : string, value : string) : DBQuery = 
 
   if value =~ datetimePEG:
     var v = parse(matches[1] & "T" & matches[2], "yyyy-MM-dd\Thh:mm:ss")
     var t = toTime(v)
     var s = toSeconds(t)
-    return newDBQuery("mtime", $s, DBMatchOperatorGt)
-
-
-
-
-
+    case matches[0]:
+    of "-":
+      return newDBQuery(key, $s, DBMatchOperatorLt)
+    else:
+      return newDBQuery(key, $s, DBMatchOperatorGt)
 
 proc modeToFileTypeMask(str : string) : int = 
   #[
@@ -339,7 +340,7 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
         of QueryFieldTypeMode:
           g.add($handlePermissions(value))
         of QueryFieldTypeTime:
-          g.add($handleTime(value))
+          g.add($handleTime(key, value))
 
     #echo "G: $1" % g
     #for gg in g:
