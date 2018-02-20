@@ -101,7 +101,7 @@ let filetypePEG = peg"""
 """
 
 let datetimePEG = peg"""
-  value <- {[+-]?} {date} 'T' {time}
+  value <- {[+-]?} {date} 'T' {time} / {[hms] \d+}
   time <- [0-9] [0-9] ':' [0-9] [0-9] ':' [0-9] [0-9]
   date <- [0-9] [0-9] [0-9] [0-9] '-' [0-9] [0-9] '-' [0-9] [0-9]
 """
@@ -109,14 +109,38 @@ let datetimePEG = peg"""
 proc handleTime(key : string, value : string) : DBQuery = 
 
   if value =~ datetimePEG:
-    var v = parse(matches[1] & "T" & matches[2], "yyyy-MM-dd\Thh:mm:ss")
-    var t = toTime(v)
-    var s = toSeconds(t)
-    case matches[0]:
-    of "-":
-      return newDBQuery(key, $s, DBMatchOperatorLt)
+    if matches[1].len() > 0:
+      var v = parse(matches[1] & "t" & matches[2], "yyyy-mm-dd\thh:mm:ss")
+      var t = totime(v)
+      var s = toseconds(t)
+      case matches[0]:
+      of "-":
+        return newDBQuery(key, $s, DBMatchOperatorLt)
+      else:
+        return newDBQuery(key, $s, DBMatchOperatorGt)
     else:
-      return newDBQuery(key, $s, DBMatchOperatorGt)
+      var n = 1
+      var s : TimeInterval
+      case matches[0][0]:
+      of 'h', 'H':
+        n = 60*60
+      of 'm', 'M':
+        n = 60
+      of 's', 'S':
+        n = 1
+      else:
+        raise newException(Exception, "")
+      s = seconds(parseInt(matches[0][1..^1]) * n)
+
+      var t = getTime() - s
+
+      return newDBQuery(key, $toseconds(t), DBMatchOperatorGt)
+
+
+
+
+
+
 
 proc modeToFileTypeMask(str : string) : int = 
   #[
@@ -342,11 +366,7 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
         of QueryFieldTypeTime:
           g.add($handleTime(key, value))
 
-    #echo "G: $1" % g
-    #for gg in g:
-    #echo "Adding: $1" % [$g]
     parts.add("(" & join(g, " AND ") & ")")
-    #echo parts
   echo parts.join(" OR ")
 
   var limits = ""
