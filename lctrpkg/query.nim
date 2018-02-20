@@ -9,6 +9,7 @@ import sequtils
 import db_sqlite
 import ospaths
 import posix
+import times
 
 
 type
@@ -22,9 +23,9 @@ type
     QueryFieldTypeUser
     QueryFieldTypeGroup
     QueryFieldTypeMode
+    QueryFieldTypeTime
 
-
-let QueryFields : Table[string, QueryFieldType] = {
+const QueryFields : Table[string, QueryFieldType] = {
   "name" : QueryFieldTypeString,
   "size" : QueryFieldTypeSize,
   "type" : QueryFieldTypeOType,
@@ -32,29 +33,21 @@ let QueryFields : Table[string, QueryFieldType] = {
   "user" : QueryFieldTypeUser,
   "group" : QueryFieldTypeGroup,
   "mode" : QueryFieldTypeMode,
+  "time" : QueryFieldTypeTime,
   "base" : QueryFieldTypeString,
   "order" : QueryFieldTypeOrder,
   "limit" : QueryFieldTypeLimit
 }.toTable()
 
-const FIELDS = [
-  "name",
-  "size",
-  "type",
-  "owner",
-  "user",
-  "group",
-  "mode",
-  "base",
-  "order",
-  "limit"
-]
-
-
+const FIELDS : seq[string] = (proc() : seq[string] =
+  result = @[]
+  for key in QueryFields.keys():
+    result.add(key)
+)()
 
 #PEGs for various components
 const fieldRule = map(FIELDS, proc(x : string) : string = "'" & x & "'").join("/")
-const valueRule = """('+' / '-' / '!')? \w+"""
+const valueRule = """('+' / '-' / '!')? (\w / ':' / '-')+"""
 const permissionRule = """('u' / 'g' / 'o' / 'a') [+, -] ('r' / 'w' / 'x')"""
 const jointValueRule = "$2 / $1" % [valueRule, permissionRule]
 
@@ -104,6 +97,25 @@ let permissionsPEG = peg"""
 let filetypePEG = peg"""
   value <- {'!'?}  { 'b' / 'c' / 'd' / 'p' / 'f' / 'l' / 's' }
 """
+
+let datetimePEG = peg"""
+  value <- {[+-]?} {date} 'T' {time}
+  time <- [0-9] [0-9] ':' [0-9] [0-9] ':' [0-9] [0-9]
+  date <- [0-9] [0-9] [0-9] [0-9] '-' [0-9] [0-9] '-' [0-9] [0-9]
+"""
+
+proc handleTime(value : string) : DBQuery = 
+
+  if value =~ datetimePEG:
+    var v = parse(matches[1] & "T" & matches[2], "yyyy-MM-dd\Thh:mm:ss")
+    var t = toTime(v)
+    var s = toSeconds(t)
+    return newDBQuery("mtime", $s, DBMatchOperatorGt)
+
+
+
+
+
 
 proc modeToFileTypeMask(str : string) : int = 
   #[
@@ -326,6 +338,8 @@ proc modeQuery*(config : LCTRConfig, op : var OptParser) =
           discard
         of QueryFieldTypeMode:
           g.add($handlePermissions(value))
+        of QueryFieldTypeTime:
+          g.add($handleTime(value))
 
     #echo "G: $1" % g
     #for gg in g:
