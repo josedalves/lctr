@@ -3,6 +3,7 @@ import posix.posix as posix
 import strutils
 import os
 import selectors
+import pegs
 
 type
   InotifyEventObj* = object of RootObj
@@ -54,6 +55,36 @@ proc inotifyWatcherErr(s : string, error : int = 0) =
   e.error = error
   raise e
 
+proc globToPEG*(pattern : string) : string =
+  var word : seq[char] =  @[]
+  var patternParts : seq[string] = @[]
+
+  proc endWord() = 
+    if len(word) > 0:
+      patternParts.add("'" & word.join() & "'")
+      word = @[]
+
+  proc endGroup() = 
+    patternParts.add(word.join())
+    word = @[]
+
+  for c in pattern:
+    case c:
+    of '*':
+      endWord()
+      patternParts.add("*")
+    of '?':
+      endWord()
+      patternParts.add("?")
+    of '[':
+      endWord()
+    of ']':
+      endGroup()
+    else:
+      word.add(c)
+  endWord()
+  return patternParts.join(" ")
+
 proc newInotifyEvent*(wd : cint, mask : uint32, cookie : uint32,
                       name : string, path : string) : InotifyEvent =
   result = new InotifyEvent
@@ -91,19 +122,38 @@ method getWatcher*(self : InotifyManager, wd : int) : InotifyWatcher =
 method getWatcher(self : InotifyManager, path : string) : InotifyWatcher = discard
 
 # Add a new watcher
-method addWatcher*(i : InotifyManager, path : string, mask : uint32, recursive : bool = false ) {.base.} = 
+method addWatcher*(i : InotifyManager, path : string, mask : uint32,
+                   recursive : bool = false, maxDepth : int = high(int),
+                   excludeDirs : seq[string] = @[] ) {.base.} = 
   var w : cint
+  var stk : seq[tuple[path : string, depth : int]] = @[]
 
-  w = inotify.inotify_add_watch(i.fd, path, mask)
-  if w < 0:
-    inotifyWatcherErr("addWatcher error: $1" % $strerror(errno), errno)
+  if not recursive:
+    w = inotify.inotify_add_watch(i.fd, path, mask)
+    if w < 0:
+      inotifyWatcherErr("addWatcher error: $1" % $strerror(errno), errno)
+    return
 
-  i.watchers.add(newInotifyWatcher(w, path, mask))
+  stk.add((path, 0))
 
-  if recursive:
-    for kind, npath in os.walkDir(path):
-      if kind == pcDir:
-        i.addWatcher(npath, mask, recursive)
+  while len(stk) > 0:
+    let nxt = stk.pop()
+
+    w = inotify.inotify_add_watch(i.fd, nxt.path, mask)
+    if w < 0:
+      inotifyWatcherErr("addWatcher error: $1" % $strerror(errno), errno)
+    i.watchers.add(newInotifyWatcher(w, nxt.path, mask))
+
+    if nxt.depth < maxDepth:
+      for kind, npath in os.walkDir(nxt.path):
+        for ex in excludeDirs:
+          if splitPath(npath)[1] =~ peg(globToPEG(ex)):
+            continue
+        if kind == pcDir:
+          stk.add((npath, nxt.depth+1))
+    else:
+      echo "Ex: depth"
+
 
 proc calculateNeededWatchers*(path : string) : int = 
   var stk : seq[string] = @[path]

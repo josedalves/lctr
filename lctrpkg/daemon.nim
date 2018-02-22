@@ -27,14 +27,20 @@ const
     pinotify.IN_MODIFY
   )
 
+const pathPEG = """
+  \@
+"""
+
 
 type
   MyInotifyEvent = inotify.InotifyEvent
 
   MonitorSpecObj = object
-    dir : string
+    path : string
     depth : int
     exclude : seq[string]
+  MonitorSpec = ref MonitorSpecObj
+  #MonitorSpec = tuple[dir : string, depth : int, exclude : seq[string]]
 
 var errno {.importc, header: "<errno.h>".}: cint ## error variable
 
@@ -94,7 +100,7 @@ proc processThread(config : LCTRConfig,  events : seq[MyInotifyEvent]) =
   db_conn.close()
   process_lock.release()
 
-proc monitor(config : LCTRConfig) = 
+proc monitor(config : LCTRConfig, monitorSpecs : seq[MonitorSpec]) = 
   var im = newInotifyManager()
   #var process : Thread[tuple[directory : string, events : seq[MyInotifyEvent]]]
   var cache : seq[MyInotifyEvent] = @[]
@@ -109,11 +115,13 @@ proc monitor(config : LCTRConfig) =
 
   #echo expandFilename("~/work")
 
-  try:
-    im.addWatcher(expandTilde("~/work"), INOTIFY_EVENTS, true)
-  except InotifyWatcherException as e:
-    if e.error == ENOSPC:
-      echo "Failed to create all watchers. Please increase watch limit with 'echo n > /proc/sys/fs/inotify/max_user_watches'"
+  for spec in monitorSpecs:
+    try:
+      echo spec.path, " ", spec.depth, " ", spec.exclude
+      im.addWatcher(expandTilde(spec.path), INOTIFY_EVENTS, true, spec.depth, spec.exclude)
+    except InotifyWatcherException as e:
+      if e.error == ENOSPC:
+        echo "Failed to create all watchers. Please increase watch limit with 'echo n > /proc/sys/fs/inotify/max_user_watches'"
 
   while running:
     try:
@@ -139,9 +147,44 @@ proc handleTERM(i : cint) =
 proc handleINT(i : cint) = 
   running = false
 
-proc modeDaemon*(config : LCTRConfig, opts : OptParser) = 
+# lctr daemon 'monitor:/foo/bar depth:2 exclude:.*'
+# lctr daemon --monitor:'/home/sup' --exclude:'ff' --exclude:'ff' --limit:1 --monitor:
+proc modeDaemon*(config : LCTRConfig, op : var OptParser) = 
   # signal handler:
   signal(SIGTERM, handleTERM)
   signal(SIGINT, handleINT)
-  monitor(config)
+  var specs : seq[MonitorSpec] = @[]
+  var cur : MonitorSpec
+
+  op.next()
+  while op.kind != cmdEnd:
+    case op.kind:
+    of cmdLongOption:
+      case op.key:
+      of "monitor":
+        if cur != nil:
+          specs.add(cur)
+        cur = new MonitorSpec
+        cur.path = op.val
+        cur.depth = high(int)
+        cur.exclude = @[]
+      of "depth":
+        if cur == nil:
+          raise newException(Exception, "")
+        cur.depth = parseInt(op.val)
+      of "exclude":
+        if cur == nil:
+          raise newException(Exception, "")
+        cur.exclude.add(op.val)
+    else:
+      raise newException(Exception, "")
+    op.next()
+
+  if cur != nil:
+    specs.add(cur)
+
+  if len(specs) == 0:
+    raise newException(Exception, "")
+
+  monitor(config, specs)
 
