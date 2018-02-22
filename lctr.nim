@@ -35,8 +35,8 @@ proc main =
       of cmdArgument:
         case op.key:
           of "daemon":
-            #mainThread(config)
-            modeDaemon(config)
+            modeDaemon(config, op)
+            return
           of "createdb":
             echo config.dbPath
             var db_conn = newLCTRDBConnection(config.dbPath)

@@ -10,6 +10,7 @@ import posix
 import tables
 import sequtils
 import dbfields
+import os
 
 
 type
@@ -426,4 +427,21 @@ proc newDBQuery*(field : string, value : string, operator : DBMatchOperator, quo
   result = new DBQuery
   result.kind = OpMatch
   result.match = newDBQueryMatchCriteria(field, value, operator, quote)
+
+
+method acquireDBLock*(self : LCTRDBConnection, retries : int = 0, timeout : int = 1000) {.gcsafe.} = 
+  var r = retries
+
+  while true:
+    try:
+      discard self.conn.getValue(sql"""BEGIN EXCLUSIVE;""")
+      return
+    except DBError as e:
+      dec(r)
+      if r == 0:
+        raise
+      os.sleep(timeout)
+
+method releaseDBLock*(self : LCTRDBConnection) {.noSideEffect.}= 
+  discard self.conn.getValue(sql"""END;""")
 

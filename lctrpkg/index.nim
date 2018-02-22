@@ -79,15 +79,8 @@ proc modeRefreshDelete(config : LCTRConfig, op : var OptParser) =
 
   dirStack = @[path]
 
+  db.acquireDBLock()
   db.rmDirTree(path)
-
-
-  #echo len(t)
-  #if true:
-  #  return
-
-  db.conn.exec(sql"""BEGIN""")
-
 
   while dirStack.len() > 0:
     let dir = dirStack.pop()
@@ -110,8 +103,10 @@ proc modeRefreshDelete(config : LCTRConfig, op : var OptParser) =
       else:
         continue
     updateDir(db, dir, attrs)
-  db.conn.exec(sql"""COMMIT""")
-  db.conn.exec(sql"""VACUUM""")
+  db.releaseDBLock()
+  if not db.conn.tryExec(sql"""VACUUM"""):
+    if config.verbose:
+      echo "Database is locked. Postponing VACUUM."
 
 proc modeRefreshNormal(config : LCTRConfig, op : var OptParser) = 
   # Refresh mode: Manual database update

@@ -8,25 +8,37 @@ import posix
 import db
 import datatypes
 import db_sqlite
+import strutils
+import parseopt2
 
 var process_lock : Lock
+var running : bool = false
 
 const
-  INOTIFY_EVENTS = (pinotify.IN_MODIFY or
+  INOTIFY_EVENTS = (
+    #pinotify.IN_ACCESS or
     pinotify.IN_ATTRIB or
     pinotify.IN_CLOSE_WRITE or
-    pinotify.IN_MOVE or
     pinotify.IN_CREATE or
     pinotify.IN_DELETE or
+    pinotify.IN_MOVE or
     pinotify.IN_DELETE_SELF or
-    pinotify.IN_MOVE_SELF
+    pinotify.IN_MOVE_SELF or
+    pinotify.IN_MODIFY
   )
 
 
 type
   MyInotifyEvent = inotify.InotifyEvent
 
+  MonitorSpecObj = object
+    dir : string
+    depth : int
+    exclude : seq[string]
+
 var errno {.importc, header: "<errno.h>".}: cint ## error variable
+
+proc signal*(sig : cint, f : pointer) {.importc: "signal", header: "<signal.h>".}
 
 proc myStat(dir : string) : Stat =
   var r = stat(dir, result)
@@ -35,13 +47,10 @@ proc myStat(dir : string) : Stat =
     raise newException(Exception, "Bad stat")
 
 proc processThread(config : LCTRConfig,  events : seq[MyInotifyEvent]) = 
-  {.hint : "processThread: Arguments are a mess" .}
   process_lock.acquire()
-
-  var i = 0
   var fullpath : string
-  var db_conn = newLCTRDBConnection(config.dbPath)
-  echo "Handling queries!"
+  var db_conn : LCTRDBConnection = newLCTRDBConnection(config.dbPath)
+  db_conn.acquireDBLock(retries=60, timeout=1000)
 
   for e in events:
     if e.name == nil:
@@ -49,46 +58,47 @@ proc processThread(config : LCTRConfig,  events : seq[MyInotifyEvent]) =
     else:
       fullpath = joinPath(e.path, e.name)
 
-    echo e.name
-    echo e.path
-    echo e.mask
-
     try:
+
       if (e.mask and pinotify.IN_ISDIR) != 0:
+        #TODO : Handle directories
         continue
+
       if (e.mask and pinotify.IN_ATTRIB) != 0:
-        echo "1"
+        echo "Attributes changed for $1" % fullpath
         db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
       elif (e.mask and pinotify.IN_CLOSE_WRITE) != 0:
-        echo "2"
+        echo "Close write for $1" % fullpath
         db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
-      elif (e.mask and pinotify.IN_MOVE) != 0:
-        discard
       elif (e.mask and pinotify.IN_CREATE) != 0:
-        echo "3"
+        echo "Create $1" % fullpath
         db_conn.addOrReplaceObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
       elif (e.mask and pinotify.IN_DELETE) != 0:
-        echo "4"
+        echo "Delete $1" % fullpath
         db_conn.delObject(e.name, e.path)
       elif (e.mask and pinotify.IN_MODIFY) != 0:
-        echo "5"
+        echo "Modify $1" % fullpath
         db_conn.updateObject(newLCTRAttributes(e.name, e.path, myStat(fullpath)))
       elif (e.mask and pinotify.IN_DELETE_SELF) != 0:
         discard
       elif (e.mask and pinotify.IN_MOVE_SELF) != 0:
         discard
+      elif (e.mask and pinotify.IN_MOVE) != 0:
+        echo "Move $1" % fullpath
     except DBError:
       raise
     except:
       discard
+
+  db_conn.releaseDBLock()
   db_conn.close()
-  echo "Done"
   process_lock.release()
 
-proc monitorThread(config : LCTRConfig) = 
+proc monitor(config : LCTRConfig) = 
   var im = newInotifyManager()
   #var process : Thread[tuple[directory : string, events : seq[MyInotifyEvent]]]
   var cache : seq[MyInotifyEvent] = @[]
+  running = true
 
   var db = newLCTRDBConnection(config.dbPath)
   #{.gcsafe.}:
@@ -98,9 +108,14 @@ proc monitorThread(config : LCTRConfig) =
   db.close()
 
   #echo expandFilename("~/work")
-  discard im.addWatcher(expandTilde("~/work"), INOTIFY_EVENTS, true)
 
-  while true:
+  try:
+    im.addWatcher(expandTilde("~/work"), INOTIFY_EVENTS, true)
+  except InotifyWatcherException as e:
+    if e.error == ENOSPC:
+      echo "Failed to create all watchers. Please increase watch limit with 'echo n > /proc/sys/fs/inotify/max_user_watches'"
+
+  while running:
     try:
       let ie = im.readEvent(1000)
       if joinPath(ie.path, ie.name) ==  expandFilename(config.dbPath):
@@ -115,10 +130,18 @@ proc monitorThread(config : LCTRConfig) =
       cache = @[]
       spawn processThread(config, c)
       process_lock.release()
+  process_lock.release()
+  im.close()
 
-proc mainThread(config : LCTRConfig) = 
-  monitorThread(config)
+proc handleTERM(i : cint) = 
+  running = false
 
-proc modeDaemon*(config : LCTRConfig) = 
-  mainThread(config)
+proc handleINT(i : cint) = 
+  running = false
+
+proc modeDaemon*(config : LCTRConfig, opts : OptParser) = 
+  # signal handler:
+  signal(SIGTERM, handleTERM)
+  signal(SIGINT, handleINT)
+  monitor(config)
 
